@@ -23,9 +23,11 @@ type ring struct {
 }
 
 func newring(n int) (*ring, error) {
-	if n <= 0 || n > 256 {
-		return nil, fmt.Errorf("invalid number of paritions: %d", n)
+	if n <= 0 || (n&(n-1)) != 0 || n > 256 {
+		return nil, fmt.Errorf("invalid number of partitions (must be power of 2 upto 256): %d", n)
 	}
+
+	fmt.Println("Ring size set to ", n)
 
 	r := ring{
 		continuum: make([]*partition, 256), // maximum number of partitions.

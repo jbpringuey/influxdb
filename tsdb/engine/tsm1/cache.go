@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,20 @@ import (
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/tsdb"
 )
+
+var ringSize = 256
+
+func init() {
+	if os.Getenv("RING_SIZE") != "" {
+		size, err := strconv.ParseInt(os.Getenv("RING_SIZE"), 10, 64)
+		if err != nil {
+			fmt.Printf("WARNING DID NOT READ ENV VAR: %v\n", err)
+			return
+		}
+
+		ringSize = int(size)
+	}
+}
 
 var (
 	ErrCacheInvalidCheckpoint = fmt.Errorf("invalid checkpoint")
@@ -198,7 +213,7 @@ type Cache struct {
 // NewCache returns an instance of a cache which will use a maximum of maxSize bytes of memory.
 // Only used for engine caches, never for snapshots
 func NewCache(maxSize uint64, path string) *Cache {
-	store, _ := newring(256)
+	store, _ := newring(ringSize)
 	c := &Cache{
 		maxSize:      maxSize,
 		store:        store, // Max size for now..
@@ -340,7 +355,7 @@ func (c *Cache) Snapshot() (*Cache, error) {
 
 	// If no snapshot exists, create a new one, otherwise update the existing snapshot
 	if c.snapshot == nil {
-		store, err := newring(256)
+		store, err := newring(ringSize)
 		if err != nil {
 			return nil, err
 		}
@@ -373,7 +388,7 @@ func (c *Cache) Snapshot() (*Cache, error) {
 	snapshotSize := c.Size() // record the number of bytes written into a snapshot
 
 	var err error
-	if c.store, err = newring(256); err != nil {
+	if c.store, err = newring(ringSize); err != nil {
 		return nil, err
 	}
 	atomic.StoreUint64(&c.size, 0)
