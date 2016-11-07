@@ -466,6 +466,11 @@ func (e *Engine) LoadMetadataIndex(shardID uint64, index *tsdb.DatabaseIndex) er
 
 	// load metadata from the Cache
 	if err := e.Cache.ApplyEntryFn(func(key string, entry *entry) error {
+		// The engine does not support adding to the index in parallel, so
+		// we have to perform each one of these in turn.
+		e.mu.Lock()
+		defer e.mu.Unlock()
+
 		fieldType, err := entry.values.InfluxQLType()
 		if err != nil {
 			e.logger.Printf("error getting the data type of values for key %s: %s", key, err.Error())
