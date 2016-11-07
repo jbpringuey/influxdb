@@ -15,11 +15,11 @@ type ring struct {
 	partitions []*partition // The unique set of partitions in the ring.
 	continuum  []*partition // A mapping of parition to location on the ring continuum.
 
-	// Number of entries held within the ring. This is used to provide a
+	// Number of keys within the ring. This is used to provide a
 	// hint for allocating a []string to return all keys. It will not be
 	// perfectly accurate since it doesn't consider adding duplicate keys,
 	// or trying to remove non-existent keys.
-	entryN int64
+	keysHint int64
 }
 
 func newring(n int) (*ring, error) {
@@ -38,11 +38,25 @@ func newring(n int) (*ring, error) {
 	// of the N partitions.
 	for i := 0; i < len(r.continuum); i++ {
 		if (i == 0 || i%(256/n) == 0) && len(r.partitions) < n {
-			r.partitions = append(r.partitions, &partition{store: make(map[string]*entry)})
+			r.partitions = append(r.partitions, &partition{
+				store:          make(map[string]*entry),
+				entrySizeHints: make(map[uint64]int),
+			})
 		}
 		r.continuum[i] = r.partitions[len(r.partitions)-1]
 	}
 	return &r, nil
+}
+
+// reset resets the ring so it can be reused. Before removing references to entries
+// within each partition it gathers sizing information to provide hints when
+// reallocating entries in parition maps.
+//
+// reset is not safe for use by multiple goroutines.
+func (r *ring) reset() {
+	for _, partition := range r.partitions {
+		partition.reset()
+	}
 }
 
 // getPartition retrieves the hash ring partition associated with the provided
@@ -69,22 +83,22 @@ func (r *ring) write(key string, values Values) error {
 // add adds an entry to the ring.
 func (r *ring) add(key string, entry *entry) {
 	r.getPartition(key).add(key, entry)
-	atomic.AddInt64(&r.entryN, 1)
+	atomic.AddInt64(&r.keysHint, 1)
 }
 
 // remove deletes the entry for the given key.
 // remove is safe for use by multiple goroutines.
 func (r *ring) remove(key string) {
 	r.getPartition(key).remove(key)
-	if r.entryN > 0 {
-		atomic.AddInt64(&r.entryN, -1)
+	if r.keysHint > 0 {
+		atomic.AddInt64(&r.keysHint, -1)
 	}
 }
 
 // keys returns all the keys from all partitions in the hash ring. The returned
 // keys will be in order if sorted is true.
 func (r *ring) keys(sorted bool) []string {
-	keys := make([]string, 0, atomic.LoadInt64(&r.entryN))
+	keys := make([]string, 0, atomic.LoadInt64(&r.keysHint))
 	for _, p := range r.partitions {
 		keys = append(keys, p.keys()...)
 	}
@@ -136,8 +150,9 @@ func (r *ring) apply(f func(string, *entry) error) error {
 }
 
 type partition struct {
-	mu    sync.RWMutex
-	store map[string]*entry
+	mu             sync.RWMutex
+	store          map[string]*entry
+	entrySizeHints map[uint64]int
 }
 
 // entry returns the partition's entry for the provided key.
@@ -160,7 +175,12 @@ func (p *partition) write(key string, values Values) error {
 		return e.add(values)
 	}
 
-	e, err := newEntryValues(values)
+	// Create new entry.
+	p.mu.RLock()
+	hint, _ := p.entrySizeHints[xxhash.Sum64([]byte(key))]
+	p.mu.RUnlock()
+
+	e, err := newEntryValues(values, hint)
 	if err != nil {
 		return err
 	}
@@ -194,4 +214,22 @@ func (p *partition) keys() []string {
 	}
 	p.mu.RUnlock()
 	return keys
+}
+
+// reset resets the parition by reinitialising the store. reset returns hints
+// about sizes that the entries within the store could be reallocated with.
+func (p *partition) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for k, entry := range p.store {
+		// If there are many values in the entry then store a hint as to
+		// what size it should be reallocated to in the future.
+		if len(entry.values) > 128 { // 4 x the default entry size.
+			p.entrySizeHints[xxhash.Sum64([]byte(k))] = len(entry.values)
+		}
+	}
+
+	// Reset the store.
+	p.store = make(map[string]*entry, len(p.store))
 }
